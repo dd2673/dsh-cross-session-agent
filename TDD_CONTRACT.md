@@ -9,6 +9,8 @@ owner of session state and history.
 
 ## Authorization
 
+- All four tools require an explicit allowedPairs entry with stable Session IDs; default deny.
+- Each coordination id has a bidirectional native-log message budget, serialized per pair and preserved across restarts.
 - The caller must be a normal root/fork session with a non-empty `cwd`.
 - The target must exist, be different from the caller, be unarchived, and not
   have `origin: subagent`.
@@ -70,5 +72,17 @@ owner of session state and history.
 7. Query failure/cancellation returns no partial context. Concurrent target
    mutation cannot alter the detached returned snapshot.
 8. Existing list/send/receipt and client UI tests remain green.
-9. Package allowlist, packed-plugin rc.6 load, and real profile smoke tests pass
+9. Package allowlist, packed-plugin 0.2.0-rc.2 load, and real profile smoke tests pass
    before release.
+
+## Messaging and Receipt Regression Acceptance
+
+- Both live and cold receipt paths use public SessionQuery.readSession; no Session.events access.
+- Slice the exact inheritedEventCount before folding Inbox events. Require real sender/target provenance.
+- Recheck abort, archive, cwd and origin around each asynchronous stage and in the resume publication commit.
+- A canceled pre-delivery call emits no new message; release a newly acquired invalid handle. Native already-accepted messages are not retracted.
+- Test unpaired/same-cwd/cross-cwd boundaries for discovery, sending, reading and receipts.
+- Exercise concurrent bidirectional budget checks and a process restart over real JSONL history.
+- Error codes use bounded safe symbols; readable text is not automatically scanned for secrets.
+- A disposable real profile must load the packed fork and run cold A→B→A→B through actual Agent tool dispatch, with a deterministic offline provider.
+- Verify the real client loads the DSH 0.2 primitive and retains legacy-card rendering.

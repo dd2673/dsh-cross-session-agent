@@ -45,7 +45,7 @@ function setupContextTool({ caller = agent('session-caller'), target, records, s
     },
     effect(factory) { return factory() },
     on() {},
-  })
+  }, { allowedPairs: [{ id: 'context-fixture', sessions: [String(caller.id), String(target?.id ?? records?.find((record) => record.header.id !== String(caller.id))?.header.id ?? 'session-peer')], maxMessages: 20 }] })
   return { tool: tools.get('get_peer_context'), query }
 }
 
@@ -223,7 +223,7 @@ test('peer context revalidates the atomic snapshot header after directory author
   )
 })
 
-test('peer context exposes only rc.6 running, idle, or offline runtime states', async () => {
+test('peer context exposes only rc.2 running, idle, or offline runtime states', async () => {
   for (const status of ['running', 'idle']) {
     const target = agent('session-peer')
     target.status = status

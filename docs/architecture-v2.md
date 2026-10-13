@@ -2,7 +2,7 @@
 
 > Status: active product and implementation contract
 >
-> Version: 0.1.0, 2026-08-15
+> Version: 0.1.4, 2026-10-13 (lilongsky fork)
 >
 > **Unofficial.** Not affiliated with, endorsed by, or supported by DeepSeek or
 > DeepSeek Harness.
@@ -33,6 +33,7 @@ blocker report, and use a receipt only for transport diagnostics.
 
 ## Trust and authorization
 
+All four tools require an explicit configured Session pair and identical cwd.
 `get_peer_context` accepts only a normal root/fork caller and target that are
 different, unarchived, non-subagent, and have exactly equal non-empty `cwd`.
 Missing and cross-workspace targets fail through one generic authorization
@@ -91,6 +92,26 @@ source/tag data only to display existing session history. Client DOM decoration
 is presentation-only; it cannot influence identity, authorization, routing, or
 delivery.
 
+The official DSH `@` source owns Session selection, canonical reference syntax,
+composer submission, snapshot capture, reference rendering and navigation. This
+plugin registers no input source and decorates no Session references. A native
+reference grants no messaging authority. `send_agent_message.to` takes the full
+stable ID from the captured reference or authorized peer discovery, never its
+display title or encoded link. Re-review reads current workspace artifacts or
+requests a new bounded peer context instead of treating the initial snapshot as
+a live subscription.
+
+Both a native mention and a plain ID can identify a peer. Reference-only
+discussion stays in the requesting Session; an explicit send request or
+user-granted orchestration duty calls the message tool. There is no automatic
+reference listener or keyword-based forwarding path.
+
+On rc.2, the Client decorates only recognized protocol bodies in native
+`data-turn-trigger` notices and legacy relay rows. Sender navigation uses the
+public `ctx.uiWorkspace.openSession` service. Session ID copying is supplied
+through `sidebar.workspaces.session.menu.item` and the conversation header;
+the menu copies its own row's stable `sessionId`, regardless of the open chat.
+
 ## Persistence and data flow
 
 There is no network access, telemetry, independent database, transcript cache,
@@ -107,3 +128,11 @@ substitute for real Harness acceptance.
 
 See [TDD_CONTRACT.md](../TDD_CONTRACT.md), [PRIVACY.md](../PRIVACY.md), and
 [SECURITY.md](../SECURITY.md) for the normative security and data contract.
+
+## 0.1.1 fork authorization and lifecycle
+
+All four tools use a default-deny configured Session pair and exact same-cwd scope. The host checks live and queried headers, caller/target archive state and cancellation. Resume setup returns a synchronous publication commit for its final authorization check. Receipt snapshots use public SessionQuery.readSession and exclude inheritedEventCount; native relay source associates each receipt with the actual sender.
+
+A configured coordination id and finite maxMessages budget are written into the existing native relay source, not a separate database. Before delivery, the host counts unique inserted relay IDs in both members’ own Inbox logs. Per-pair serialization makes the budget check and delivery indivisible relative to other plugin sends. The process-local sent table remains bounded and stores sender identity. Removing pair configuration revokes access; the user starts a separate task with a new coordination id.
+
+The field whitelist does not scan readable text for secrets. Unsafe or overlong error codes become TOOL_ERROR. Native receipt facts, task instructions, and a reviewer’s explicit pass remain separate. The real profile acceptance uses an offline deterministic provider and native persistence, not a mock Agent registry.

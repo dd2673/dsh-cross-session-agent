@@ -1,139 +1,92 @@
+// Disposable native-profile acceptance. This runner never connects to an existing server.
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { mkdir, rm } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
+import { mkdtemp, mkdir, readFile, writeFile, access } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { resolve, join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const baseUrl = (process.argv[2] ?? 'http://127.0.0.1:3080').replace(/\/$/, '')
-const fixtureBase = resolve(process.argv[3] ?? join(tmpdir(), 'dsh-cross-session-agent-e2e'))
-const fixtureRoot = resolve(fixtureBase, `run-${randomUUID()}`)
-const sameCwd = resolve(fixtureRoot, 'same-workspace')
-const otherCwd = resolve(fixtureRoot, 'other-workspace')
-const marker = `PEER_CONTEXT_TARGET_${randomUUID()}`
-const relayMarker = `PEER_COORDINATION_RELAY_${randomUUID()}`
+assert.equal(Number(process.versions.node.split('.')[0]), 24, 'Run this acceptance with Node 24')
+const dsh = process.argv[2] ?? 'dsh'
+assert.ok(!/^https?:/.test(dsh), 'Pass a DSH CLI, not a server URL')
+const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const root = await mkdtemp(join(tmpdir(), 'dsh-cross-session-agent-'))
+const home = join(root, 'home')
+const cwd = join(root, 'same-workspace')
+const otherCwd = join(root, 'other-workspace')
+await Promise.all([mkdir(home), mkdir(cwd), mkdir(otherCwd)])
+const env = { ...process.env, DSH_HOME: home, DSH_TELEMETRY_DISABLED: '1' }
+const ids = Object.fromEntries(['a', 'b', 'c', 'd', 'fork'].map((key) => [key, 'session-' + randomUUID()]))
+const runId = 'acceptance-' + randomUUID()
+const outputs = [join(root, 'initial.json'), join(root, 'restart.json')]
+const allowedPairs = [
+  { id: runId, sessions: [ids.a, ids.b], maxMessages: 3 },
+  { id: 'cross-workspace-probe', sessions: [ids.a, ids.c], maxMessages: 1 },
+  { id: 'fork-probe', sessions: [ids.a, ids.fork], maxMessages: 1 },
+]
 
-await Promise.all([mkdir(sameCwd, { recursive: true }), mkdir(otherCwd, { recursive: true })])
-
-async function rpc(method, payload) {
-  const rpcId = `cross-session-e2e-${randomUUID()}`
-  const response = await fetch(`${baseUrl}/api/${method}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ type: 'client-request', rpcId, method, payload }),
+async function command(bin, args) {
+  const child = spawn(bin, args, { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] })
+  let output = ''
+  for (const stream of [child.stdout, child.stderr]) stream.on('data', (chunk) => { output += chunk })
+  await new Promise((resolvePromise, reject) => {
+    child.once('error', reject)
+    child.once('exit', (code) => code === 0 ? resolvePromise() : reject(new Error(`${bin} failed (${code})\n${output.slice(-6000)}`)))
   })
-  assert.equal(response.status, 200, `${method} HTTP ${response.status}`)
-  const envelope = await response.json()
-  assert.equal(envelope.type, 'server-response')
-  assert.equal(envelope.rpcId, rpcId)
-  if (envelope.result?.ok !== true) {
-    throw new Error(`${method} failed: ${JSON.stringify(envelope.result?.error)}`)
+  return output
+}
+
+async function stop(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return
+  const exited = new Promise((resolvePromise) => child.once('exit', resolvePromise))
+  child.kill('SIGTERM')
+  const timeout = setTimeout(() => child.kill('SIGKILL'), 15_000)
+  try { await exited } finally { clearTimeout(timeout) }
+}
+
+try {
+  const packed = JSON.parse(await command(process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', ['pack', '--pack-destination', root, '--json']))
+  const tarball = packed.filename ?? packed.tarballPath
+  assert.equal(typeof tarball, 'string', 'pnpm pack must return its tarball path')
+  await command(dsh, ['plugin', '--profile', 'web', 'add', resolve(root, tarball), '--ignore-scripts'])
+  const results = []
+  for (const [index, phase] of ['initial', 'restart'].entries()) {
+    const patch = [
+      { id: 'agent-default-model', config: { provider: 'cross-session-fixture', model: 'fixture' } },
+      { id: 'session-title-llm', disabled: true },
+      { id: 'hmr', disabled: true },
+      { id: 'session-persistence-jsonl', config: { root: join(home, 'sessions'), compression: 'none' } },
+      { id: 'cross-session-agent', config: { allowedPairs } },
+      { insert: [{ id: 'cross-session-host-fixture', name: resolve(repo, 'scripts/host-profile-fixture.mjs'), config: { ...ids, cwd, otherCwd, runId, output: outputs[index], phase } }] },
+    ]
+    await writeFile(join(home, 'profiles/web/cordis.patch.yml'), JSON.stringify(patch, null, 2) + '\n')
+    const child = spawn(dsh, ['web', '--no-open', '--host', '127.0.0.1', '--port', '0'], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] })
+    let logs = ''
+    let spawnError
+    child.once('error', (error) => { spawnError = error })
+    for (const stream of [child.stdout, child.stderr]) stream.on('data', (chunk) => { logs += chunk })
+    try {
+      const deadline = Date.now() + 90_000
+      let result
+      while (Date.now() < deadline) {
+        if (spawnError) throw spawnError
+        try { await access(outputs[index]); result = JSON.parse(await readFile(outputs[index], 'utf8')); break } catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error }
+        if (child.exitCode !== null || child.signalCode !== null) throw new Error(`profile exited before acceptance\n${logs.slice(-10000)}`)
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 100))
+      }
+      assert.ok(result, `profile acceptance timed out\n${logs.slice(-10000)}`)
+      assert.equal(result.ok, true, result.error)
+      results.push(result)
+    } finally {
+      await stop(child)
+      await writeFile(join(root, phase + '.log'), logs)
+    }
   }
-  return envelope.result.value
+  const report = { ok: true, dsh, node: process.versions.node, home, root, ids, runId, onlineModelRequests: false, results }
+  await writeFile(join(root, 'acceptance.json'), JSON.stringify(report, null, 2) + '\n')
+  process.stdout.write(JSON.stringify(report, null, 2) + '\n')
+} catch (error) {
+  process.stderr.write(`Acceptance artifacts preserved at ${root}\n`)
+  throw error
 }
-
-async function createSession(cwd) {
-  return (await rpc('session.create', { cwd })).sessionId
-}
-
-async function prompt(sessionId, text) {
-  const result = await rpc('session.prompt', {
-    sessionId,
-    mode: 'queue',
-    content: [{ type: 'text', text }],
-  })
-  assert.equal(result.accepted, true)
-}
-
-async function history(sessionId) {
-  const value = await rpc('session.history', { sessionId, maxMessages: 200 })
-  return value.events.map((entry) => entry.event)
-}
-
-async function waitForTurnEnd(sessionId, previousEnds = 0, timeoutMs = 120_000) {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    const events = await history(sessionId)
-    if (events.filter((event) => event.type === 'turn/end').length > previousEnds) return events
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 500))
-  }
-  throw new Error(`timed out waiting for ${sessionId}`)
-}
-
-function toolDispatches(events, name) {
-  return events.filter((event) => event.type === 'tool/code-dispatch' && event.data?.name === name)
-}
-
-const targetId = await createSession(sameCwd)
-const callerId = await createSession(sameCwd)
-const crossWorkspaceId = await createSession(otherCwd)
-
-await prompt(targetId, `Isolated acceptance fixture. Do not call tools or modify files. Reply with exactly this marker and nothing else: ${marker}`)
-const targetEvents = await waitForTurnEnd(targetId)
-assert.match(JSON.stringify(targetEvents), new RegExp(marker))
-
-await prompt(callerId, [
-  'Isolated acceptance fixture. Do not call any tool except get_peer_context.',
-  `Call get_peer_context exactly once with sessionId ${targetId}, view overview, maxMessages 3.`,
-  `Then state whether its returned conversation contains ${marker}.`,
-].join(' '))
-let callerEvents = await waitForTurnEnd(callerId)
-const allowedResults = toolDispatches(callerEvents, 'get_peer_context')
-assert.equal(allowedResults.length, 1, 'expected one successful get_peer_context call')
-assert.equal(allowedResults[0].data.isError, false)
-const projected = JSON.parse(allowedResults[0].data.content[0].text)
-const allowedJson = JSON.stringify(projected)
-assert.match(allowedJson, new RegExp(marker))
-assert.match(allowedJson, /untrusted data/i)
-assert.doesNotMatch(allowedJson, /tool\/call|tool\/result|request\/header|reasoning/)
-assert.equal(projected.activity.turn.state, 'ended')
-assert.equal(projected.activity.step.state, 'ended')
-
-await prompt(callerId, [
-  'Isolated negative acceptance fixture. Do not call any tool except get_peer_context.',
-  `Call get_peer_context exactly once with sessionId ${crossWorkspaceId}, view conversation, maxMessages 1.`,
-  'Report the tool error without retrying.',
-].join(' '))
-callerEvents = await waitForTurnEnd(callerId, 1)
-const allContextCalls = callerEvents.filter((event) => event.type === 'tool/code-dispatch-start' && event.data?.name === 'get_peer_context')
-assert.equal(allContextCalls.length, 2, 'expected one allowed and one denied context call')
-const deniedResults = toolDispatches(callerEvents, 'get_peer_context').slice(1)
-assert.equal(deniedResults.length, 1)
-assert.equal(deniedResults[0].data.isError, true)
-assert.match(JSON.stringify(deniedResults[0].data.content), /无权读取该协作会话上下文/)
-
-await prompt(callerId, [
-  'Isolated relay acceptance fixture. Do not call any tool except send_agent_message.',
-  `Call send_agent_message exactly once with to ${targetId}, mode followup, and content "${relayMarker}. No reply is needed."`,
-  'Do not retry.',
-].join(' '))
-callerEvents = await waitForTurnEnd(callerId, 2)
-const relayDispatches = toolDispatches(callerEvents, 'send_agent_message')
-assert.equal(relayDispatches.length, 1)
-assert.equal(relayDispatches[0].data.isError, false)
-
-const relayedTargetEvents = await waitForTurnEnd(targetId, 1)
-const relayedMessage = relayedTargetEvents.find((event) =>
-  event.type === 'user/message'
-  && event.data?.source?.kind === 'dsh-cross-session-agent'
-  && event.data?.source?.senderSessionId === callerId
-  && JSON.stringify(event.data?.content).includes(relayMarker))
-assert.ok(relayedMessage, 'target must receive the new relay source kind')
-const relayedText = JSON.stringify(relayedMessage.data.content)
-assert.match(relayedText, /<dsh-cross-session-agent>/)
-assert.doesNotMatch(relayedText, /<dsh-agent-message>/)
-
-await rm(fixtureRoot, { recursive: true, force: true })
-
-process.stdout.write(JSON.stringify({
-  ok: true,
-  targetId,
-  callerId,
-  crossWorkspaceId,
-  marker,
-  assertions: [
-    'packed plugin loaded by rc.6 profile',
-    'same-workspace context read returned bounded conversation and structural activity',
-    'cross-workspace context read failed closed',
-    'new relay source and tag were persisted by Harness',
-  ],
-}, null, 2) + '\n')

@@ -15,13 +15,14 @@ const expectedFiles = [
   'cordis.patch.yml',
   'docs/architecture-v2.md',
   'docs/assets/message-header-navigation.jpg',
+  'docs/validation-0.2.0-rc.2.md',
   'lib/client.js',
   'lib/index.js',
   'lib/peer-context.js',
   'package.json',
 ]
 
-test('npm 发布包只包含完整的运行时文件', () => {
+test('发布包只包含完整的运行时文件', () => {
   const command = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
   const output = process.platform === 'win32'
     ? execFileSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', 'pnpm.cmd pack --dry-run --json'], { encoding: 'utf8' })
